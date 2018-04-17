@@ -33,6 +33,7 @@ import javax.websocket.DeploymentException;
 import com.roguecloud.NG;
 import com.roguecloud.client.ClientMappingSingleton;
 import com.roguecloud.client.ClientState;
+import com.roguecloud.client.LibertyClientInstance;
 import com.roguecloud.client.LibertyWebsocketFactory;
 import com.roguecloud.client.RemoteClient;
 import com.roguecloud.client.ai.SimpleAI;
@@ -190,14 +191,16 @@ public class StartAgentServlet extends HttpServlet {
 	
 	private static void doInitialConnect(String username, String password, String uuid) throws DeploymentException, IOException, URISyntaxException, InterruptedException {
 
-		Thread t = new Thread() {
+		Thread mainConnectThread = new Thread() {
 			public void run() {
 				
 				ConnectData data = new ConnectData();
 				
-				while(true) {
+				boolean continueLoop = true;
+				
+				while(continueLoop) {
 					try {
-						doInitialConnectInner(username, password, uuid, data, constructMyAI());
+						continueLoop = doInitialConnectInner(username, password, uuid, data, constructMyAI());
 					} catch (Exception e) {
 						log.err("Error in connection loop", e, null);
 						e.printStackTrace();
@@ -208,11 +211,13 @@ public class StartAgentServlet extends HttpServlet {
 				
 			}
 		};
-		t.start();
+		mainConnectThread.start();
+		LibertyClientInstance.getInstance().add(mainConnectThread);
 		
 	}
 	
-	private static void doInitialConnectInner(String username, String password, String uuid, ConnectData data, RemoteClient remoteClient) throws DeploymentException, IOException, URISyntaxException, InterruptedException {
+	/** Returns true if the calling connection method should continue, or false otherwise. */
+	private static boolean doInitialConnectInner(String username, String password, String uuid, ConnectData data, RemoteClient remoteClient) throws DeploymentException, IOException, URISyntaxException {
 
 		ClientState state = new ClientState(username, password, uuid, remoteClient, new LibertyWebsocketFactory(), data.numberOfTimesInterupted);
 		ClientMappingSingleton.getInstance().putClientState(uuid, state);
@@ -220,21 +225,32 @@ public class StartAgentServlet extends HttpServlet {
 		
 		state.initialConnect(CLIENT_API_URL);
 		
-		while(!state.isRoundComplete() && !state.isClientInterrupted()) {
-			Thread.sleep(100);
+		boolean threadInterrupted = false;
+		
+		while(!state.isRoundComplete() && !state.isClientInterrupted() && !threadInterrupted) {
+			try { Thread.sleep(100); } catch (InterruptedException e) { threadInterrupted = true; }
+			
+			if(Thread.interrupted()) {
+				threadInterrupted = true;
+			}
 		}
 
 		if(state.isRoundComplete()) {
 			data.roundComplete = true;
 			data.numberOfTimesInterupted = 0;
-			System.err.println("Round is over, waiting "+state.getNextRoundInXSeconds()+" seconds.");
-			TimeUnit.SECONDS.sleep(state.getNextRoundInXSeconds()+2);
+			System.out.println("Round is over, waiting "+state.getNextRoundInXSeconds()+" seconds.");
+			try { TimeUnit.SECONDS.sleep(state.getNextRoundInXSeconds()+2); } catch (InterruptedException e) { threadInterrupted = true; }
 		}
 		
 		if(state.isClientInterrupted()) {
-			System.err.println("Client was interrupted -- restarting.");
+			System.out.println("Client was interrupted -- restarting.");
 			data.roundComplete = false;
 			data.numberOfTimesInterupted++;
+		}
+		
+		if(threadInterrupted) {
+			System.out.println("Thread was interrupted.");
+			return false;
 		}
 		
 		ClientMappingSingleton.getInstance().removeClientState(uuid);
@@ -246,6 +262,7 @@ public class StartAgentServlet extends HttpServlet {
 			};
 		}.start();
 
+		return true;
 	}
 	
 	private static boolean isValidatedUsernameAndPassword(String username, String password) {
