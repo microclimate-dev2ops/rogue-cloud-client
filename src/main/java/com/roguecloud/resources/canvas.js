@@ -206,7 +206,7 @@ var globalState;
 
 			}
 
-		}, 1000);
+		}, 5000);
 	} catch(err) {
 		console.log(err);
 		// reestablishConnection();
