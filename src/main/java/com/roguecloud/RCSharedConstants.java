@@ -23,8 +23,8 @@ import java.util.concurrent.TimeUnit;
  * 
  * This class is an internal class, for server use only. */
 public class RCSharedConstants {
-	
-	public static final String CLIENT_API_VERSION = "1.0";
+
+	public static final String CLIENT_API_VERSION = "18.5";
 	
 	public static final long MAX_ROUND_LENGTH_IN_NANOS = TimeUnit.NANOSECONDS.convert(10, TimeUnit.MINUTES);
 	
