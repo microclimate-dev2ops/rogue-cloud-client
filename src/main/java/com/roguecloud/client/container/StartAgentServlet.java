@@ -31,6 +31,7 @@ import javax.servlet.http.HttpServletResponse;
 import javax.websocket.DeploymentException;
 
 import com.roguecloud.NG;
+import com.roguecloud.RCSharedConstants;
 import com.roguecloud.client.ClientMappingSingleton;
 import com.roguecloud.client.ClientState;
 import com.roguecloud.client.LibertyClientInstance;
@@ -152,6 +153,17 @@ public class StartAgentServlet extends HttpServlet {
 		NG.getInstance().setWhoami("client");
 
 		if(!isValidatedUsernameAndPassword(USERNAME, PASSWORD)) {
+			return;
+		}
+		
+		if(!RegisterUser.isClientApiVersionSupported(RCSharedConstants.CLIENT_API_VERSION, SERVER_URL, 90 * 1000)) {
+			
+			lastError = "\nError: This version of the Rogue Cloud client is deprecated, and thus is no longer supported by the newer version running on the Rogue Cloud game server.\n";
+			lastError += "\n";
+			lastError += "Instructions on how to upgrade to the latest client are available from the Rogue Cloud git repo:\n";
+			lastError += "https://github.com/microclimate-dev2ops/rogue-cloud/blob/master/docs/Updating-To-Latest-Client-Code.md";
+			
+			ClientContainerUtil.loudlyInformUser(lastError);
 			return;
 		}
 		

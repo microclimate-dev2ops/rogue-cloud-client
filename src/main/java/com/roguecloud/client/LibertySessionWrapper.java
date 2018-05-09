@@ -115,7 +115,7 @@ public class LibertySessionWrapper implements ISessionWrapper {
 
 		LibertyClientInstance.getInstance().add(this);
 	}
-	
+
 	// This should only be called once.
 	public void initialConnect(String url) {
 		synchronized (lock) {
@@ -125,18 +125,17 @@ public class LibertySessionWrapper implements ISessionWrapper {
 	}
 	
 	private void connect(String url) {
-		// Don't try to connect if we have already disposed of the session, or the
-		// client instance
+		// Don't try to connect if we have already disposed of the session, or the client instance
 		if (disposed || LibertyClientInstance.getInstance().isDisposed()) {
-			log.interesting("Ignoring connect as instance of wrapper is disposed.", parent.getLogContext());
+			log.interesting("Ignoring connect as instance of wrapper is disposed ["+disposed+","+LibertyClientInstance.getInstance().isDisposed()+"]", parent.getLogContext());
 			return;
 		}
 
 		log.interesting("Attempting to connect", parent.getLogContext());
 		final ClientEndpointConfig cec = ClientEndpointConfig.Builder.create().build();
-//		
-//		ClientManager client = ClientManager.createClient();
-		
+		//
+		// ClientManager client = ClientManager.createClient();
+
 		WebSocketContainer c = ContainerProvider.getWebSocketContainer();
 		c.setDefaultMaxTextMessageBufferSize(1024 * 1024);
 		c.setDefaultMaxSessionIdleTimeout(2 * TimeUnit.MILLISECONDS.convert(RCSharedConstants.MAX_ROUND_LENGTH_IN_NANOS, TimeUnit.NANOSECONDS));
@@ -145,10 +144,9 @@ public class LibertySessionWrapper implements ISessionWrapper {
 			// Wait for the endpoint to call us on success or failure.
 		} catch (DeploymentException | IOException | URISyntaxException e) {
 			errorOccurred(null);
-		}		
+		}
 
 	}
-
 	
 	private void changeState(WrapperState ws) {
 		synchronized(lock) {
@@ -171,7 +169,7 @@ public class LibertySessionWrapper implements ISessionWrapper {
 		
 		ObjectMapper om = new ObjectMapper();
 		JsonClientConnect ccj = new JsonClientConnect();
-		ccj.setClientVersion("1.0");
+		ccj.setClientVersion(RCSharedConstants.CLIENT_API_VERSION);
 		
 		ccj.setUsername(parent.getUsername());
 		ccj.setPassword(parent.getPassword());
