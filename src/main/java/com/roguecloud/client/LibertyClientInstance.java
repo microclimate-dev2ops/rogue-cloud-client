@@ -14,6 +14,7 @@
  * limitations under the License. 
 */
 
+
 package com.roguecloud.client;
 
 import java.lang.ref.WeakReference;
