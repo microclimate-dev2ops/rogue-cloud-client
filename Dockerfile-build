@@ -1,3 +1,5 @@
+USER root
+
 ENV JAVA_VERSION 1.8.0_sr5fp6
 
 RUN set -eux; \
