@@ -3,5 +3,5 @@
 /.settings
 /src/main/liberty/config/server.env
 target/
-mc-target/
 build/
+mc-target/

@@ -19,6 +19,8 @@
   <!-- Automatically expand WAR files and EAR files -->
   <applicationManager autoExpand="true"/>
 
+  <applicationMonitor pollingRate="1000ms"/>
+
   <webApplication name="RogueCloudClientLiberty" location="${app.location}"/>
 
 </server>
