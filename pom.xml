@@ -31,8 +31,8 @@
         <maven.compiler.target>1.8</maven.compiler.target>
 
         <app.name>gameclient</app.name>
-		<testServerHttpPort>9080</testServerHttpPort>
-		<testServerHttpsPort>9443</testServerHttpsPort>
+        <testServerHttpPort>9080</testServerHttpPort>
+        <testServerHttpsPort>9443</testServerHttpsPort>
         <warContext>${app.name}</warContext>
         <package.file>${project.build.directory}/${project.artifactId}-${project.version}.zip</package.file>
         <packaging.type>usr</packaging.type>
@@ -73,13 +73,20 @@
         <dependency>
             <groupId>com.ibm.runtimetools</groupId>
             <artifactId>javametrics-agent</artifactId>
-            <version>1.1.0</version>
+            <version>[1.2,2.0)</version>
             <scope>provided</scope>
         </dependency>
         <dependency>
             <groupId>com.ibm.runtimetools</groupId>
             <artifactId>javametrics-dash</artifactId>
-            <version>1.1.0</version>
+            <version>[1.2,2.0)</version>
+            <scope>provided</scope>
+            <type>war</type>
+        </dependency>
+        <dependency>
+            <groupId>com.ibm.runtimetools</groupId>
+            <artifactId>javametrics-rest</artifactId>
+            <version>[1.2,2.0)</version>
             <scope>provided</scope>
             <type>war</type>
         </dependency>
@@ -218,6 +225,18 @@
                           <stripVersion>true</stripVersion>
                           <outputDirectory>${project.build.directory}/liberty/wlp/usr/servers/defaultServer/dropins</outputDirectory>
                           <includeArtifactIds>javametrics-dash</includeArtifactIds>
+                      </configuration>
+                    </execution>
+                    <execution>
+                        <id>copy-javametrics-rest</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>copy-dependencies</goal>
+                        </goals>
+                        <configuration>
+                          <stripVersion>true</stripVersion>
+                          <outputDirectory>${project.build.directory}/liberty/wlp/usr/servers/defaultServer/dropins</outputDirectory>
+                          <includeArtifactIds>javametrics-rest</includeArtifactIds>
                       </configuration>
                     </execution>
                     <execution>
@@ -382,7 +401,7 @@
                             <assemblyArtifact>
                                 <groupId>com.ibm.websphere.appserver.runtime</groupId>
                                 <artifactId>wlp-webProfile7</artifactId>
-                                <version>17.0.0.3</version>
+                                <version>17.0.0.4</version>
                                 <type>zip</type>
                             </assemblyArtifact>
                             <configFile>${basedir}/src/main/liberty/config/server.xml</configFile>
@@ -393,6 +412,7 @@
                             <bootstrapProperties>
                                 <default.http.port>${testServerHttpPort}</default.http.port>
                                 <default.https.port>${testServerHttpsPort}</default.https.port>
+                                <app.location>${project.artifactId}-${project.version}.war</app.location>
                             </bootstrapProperties>
                             <installAppPackages>project</installAppPackages>
                         </configuration>
@@ -445,6 +465,7 @@
                             <bootstrapProperties>
                                 <default.http.port>${testServerHttpPort}</default.http.port>
                                 <default.https.port>${testServerHttpsPort}</default.https.port>
+                                <app.location>${project.artifactId}-${project.version}.war</app.location>
                             </bootstrapProperties>
                             <installAppPackages>project</installAppPackages>
                         </configuration>

@@ -1,7 +1,5 @@
 /target
-/mc-target
 /.m2
-/load-test/*/
 
 
 /.classpath
@@ -13,3 +11,5 @@
 .*.swp
 .DS_Store
 /src/main/liberty/config/server.env
+
+/mc-target
