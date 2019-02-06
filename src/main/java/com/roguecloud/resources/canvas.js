@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 IBM Corporation
+ * Copyright 2018, 2019 IBM Corporation
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,39 +16,63 @@
 
 'use strict';
 
-function canvasJs(spriteSize, myCanvas, consoleDomElement, leaderboardDomElement, metricsDomElement, viewType, optionalUuid) {
+function canvasJs(spriteSize, myCanvas, consoleDomElement, leaderboardDomElement, metricsDomElement, inventoryDomElement, equipmentDomElement, viewType, optionalUuid) {
+
+// If adjusting this, then you will need to adjust the 'minimumElapsed' algorithm too
+var LERP_CONSTANT = 5;
 
 var viewTypeParam = viewType;
 	
-console.log("view type is "+viewType);
+console.log("View type is "+viewType+" optionalUuid is "+optionalUuid);
 
 // secondaryCanvas/secondaryCtx are a copy of the last frame that was drawn to the screen BEFORE
-// the damage values, hp indicators, and usernames were drawn. This copy can then be used to refresh the 
-// screen without a full redraw. 
+// the damage values, HP indicators, and usernames were drawn. This copy can then be used to refresh the 
+// screen without a full redraw.  Thse variables are only used when the view type is SERVER_VIEW_WORLD.
 var secondaryCanvas = document.createElement("canvas"),
 	secondaryCtx = secondaryCanvas.getContext("2d");
 
+var keyFrameBufferCanvas = document.createElement("canvas"),
+	keyFrameBufferCtx = keyFrameBufferCanvas.getContext("2d");
+	
 //  Whether secondaryCtx contains frame data (this is always true after the first frame is drawn)
 var secondaryCtxDrawn = false;
 {
 	secondaryCtx.canvas.width = myCanvas.width;
 	secondaryCtx.canvas.height = myCanvas.height;
+
+	keyFrameBufferCtx.canvas.width = 80*32;
+	keyFrameBufferCtx.canvas.height = 40*32;
 }
 
 var currCanvasWidth = myCanvas.width;
 var currCanvasHeight = myCanvas.height;
 
-var debugMessagesReceived = 0;
-
 addCanvasListeners();
 
 var globalState;
+
+////Start game theme sound
+//var gameSound = new sound("resources/game-theme.mp3");
+//gameSound.play();
+
 
 // Create and define globalState object.
 {
 	{
 		globalState =  {};
-		globalState.dirtyRedraw = null;
+		
+		//The current world pixel position of the top left hand corner of the sliding view
+		//(after the current interpolation has completed)
+		globalState.lerpViewCurrPosX_pixels = -1;
+		globalState.lerpViewCurrPosY_pixels = -1;
+		
+		globalState.playerCurrHp = -1;
+		globalState.playerMaxHp = -1;
+		
+		// globalState.dirtyRedraw = null;
+		
+		// True if he have drawn at least one frame to the screen, false otherwise. (Used for misc init) 
+		globalState.firstFrameDrawn = false;		
 		
 		globalState.viewType = viewType;
 		globalState.damageGradient = generateDamageGradient();
@@ -60,21 +84,22 @@ var globalState;
 		}
 
 		globalState.nextFrameId = -1;
-		
-		globalState.contextWidthSet = true /*false*/;
+
+		globalState.lerpQueue = [];
 		
 		globalState.spriteSize = spriteSize;
 
-		// The tile (x,y) coords for the top-left hand side of the canvas
+		// The world (x,y) tile coords for the top-left-hand-side of the canvas
 		globalState.startX = null;
 		globalState.startY = null;
-		
-		// The world X coord of the top left hand tile, eg browser tile (0, 0) - from json property 'currWorldPosX' of browser update json
-		globalState.currWorldX = -1;
 
-		// The world Y coord of the top left hand tile - from json property 'currWorldPosY' of browser update json
+		
+		// The world (x, y) tile coords for the top-left-hand-side of the 80x40 agent data view 
+		// - from json property 'currWorldPosX/Y' of browser update json	
+		globalState.currWorldX = -1;
 		globalState.currWorldY = -1;
 
+		globalState.waitingCombatEvents = [];
 
 		globalState.frameQueue = [];
 		
@@ -88,9 +113,14 @@ var globalState;
 
 		// Primary canvas context	
 		globalState.ctx = myCanvas.getContext("2d");
+
+		globalState.keyFrameBufferCtx = keyFrameBufferCtx;
 		
 		// Absolute time of last frame draw in milliseconds
 		globalState.lastFrameDrawTime = 0;
+
+		// Absolute time of last lerp frame draw in milliseconds
+		globalState.lerpFrameDrawTime = 0;
 
 		// Tile are scaled to size before they are drawn to the map, but scaling is
 		// a CPU intensive process, so we cache each scale down in this map.
@@ -122,11 +152,11 @@ var globalState;
 
 	}
 
-	createWebSocketAndSetInGlobalState();
+	createWebSocketAndSetInGlobalState(optionalUuid);
 	
 }
 
-function createWebSocketAndSetInGlobalState() {
+function createWebSocketAndSetInGlobalState(optionalUuid) {
 	console.log("pre?");
 	try {
 		
@@ -139,15 +169,15 @@ function createWebSocketAndSetInGlobalState() {
 		new_uri += "//" + loc.host;
 		new_uri += loc.pathname + "/../api/browser";
 				
-		globalState.exampleSocket = new WebSocket(new_uri);
+		globalState.gameSocket = new WebSocket(new_uri);
 
 		globalState.wsInterval = setInterval( function() {
 			
 			if(globalState.ctx == null) { return; }
 			
-			if(globalState.exampleSocket.readyState != 1) {
+			if(globalState.gameSocket.readyState != 1) {
 				clearInterval(globalState.wsInterval);
-				console.log("ready state: "+globalState.exampleSocket.readyState);				
+				console.log("ready state: "+globalState.gameSocket.readyState);				
 				reestablishConnection();
 
 			}
@@ -160,13 +190,13 @@ function createWebSocketAndSetInGlobalState() {
 	}
 	console.log("post?");
 	
-	globalState.exampleSocket.onopen = function() {
+	globalState.gameSocket.onopen = function() {
 
-		if(globalState.exampleSocket == null) {
+		if(globalState.gameSocket == null) {
 			return;
 		}
 		
-		if(globalState.ctx == null) { globalState.exampleSocket.close(); }
+		if(globalState.ctx == null) { globalState.gameSocket.close(); }
 		
 		var browserConnect = {
 			"type" : "JsonBrowserConnect",
@@ -177,7 +207,7 @@ function createWebSocketAndSetInGlobalState() {
 			/* "viewOnly" : true*/
 		}
 		
-		globalState.exampleSocket.onclose = function() {
+		globalState.gameSocket.onclose = function() {
 			console.log("on close called.");
 
 			// Return if we've already disposed.
@@ -187,26 +217,20 @@ function createWebSocketAndSetInGlobalState() {
 		}
 		
 		var browserConnectJson = JSON.stringify(browserConnect);
-		globalState.exampleSocket.send(browserConnectJson);
+		globalState.gameSocket.send(browserConnectJson);
 		console.log("open: "+browserConnectJson);
 	}
 
-	globalState.exampleSocket.onerr = function(event) {
+	globalState.gameSocket.onerr = function(event) {
 		console.log("An error occurred: "+event)
 		
 		// Return if we've already disposed.
 		// reestablishConnection();		
 	}
 	
-	globalState.exampleSocket.onmessage = function(event) {
+	globalState.gameSocket.onmessage = function(event) {
 		
 		var json = jQuery.parseJSON(event.data);
-
-		if(debugMessagesReceived <= 5) {
-			// console.log("Received:");
-			debugMessagesReceived++;
-			// console.log(json);
-		}
 		
 		if(json.type == "JsonUpdateBrowserUI") {
 		
@@ -222,9 +246,9 @@ function createWebSocketAndSetInGlobalState() {
 		
 		if(!globalState.imagesLoaded) {
 			console.log("loadAndCall called.");
-			loadAndCall(event, drawFrame);
+			loadAndCall(event, receiveFrameData);
 		} else {
-			drawFrame(event);
+			receiveFrameData(event);
 		}
 		
 	}	
@@ -240,10 +264,11 @@ function reestablishConnection() {
 	disposeGlobalState();
 	console.log("reestablishConnection - setting timeout.");
 	setTimeout(function() {
-		canvasJs(spriteSize, myCanvas, consoleDomElement, leaderboardDomElement, metricsDomElement, viewTypeLocal, optionalUuid);
+		canvasJs(spriteSize, myCanvas, consoleDomElement, leaderboardDomElement, metricsDomElement, inventoryDomElement, equipmentDomElement, viewTypeLocal, optionalUuid);
+		// canvasJs(spriteSize, myCanvas, consoleDomElement, leaderboardDomElement, metricsDomElement, viewTypeLocal, optionalUuid);
 	}, 200);
-	if(globalState.exampleSocket != null) {
-		globalState.exampleSocket.close();
+	if(globalState.gameSocket != null) {
+		globalState.gameSocket.close();
 	}
 }
 
@@ -262,8 +287,18 @@ function processUpdateJsonBrowserUI(json) {
 		updateLeaderboardUI(leaderboardDomElement, json, globalState.leaderboardData);
 	}
 	
+	if(inventoryDomElement != null) {
+		updateInventoryUI(inventoryDomElement, json);
+	}
+	
+	if(equipmentDomElement != null) {
+		updateEquipmentUI(equipmentDomElement, json);
+	}
+	
 	if(json.combatEvents != null && json.combatEvents.length > 0) {
-		
+			
+		// Add all the combat events to a list
+		var entityList = [];
 		for(let c = 0; c < json.combatEvents.length; c++) {
 			let entry = json.combatEvents[c];
 			let spread = SPREAD[Math.floor(SPREAD.length * Math.random())]
@@ -283,23 +318,126 @@ function processUpdateJsonBrowserUI(json) {
 				damage : entry.damage
 			};
 			
-			globalState.entityList.push(newEntry);
+			entityList.push(newEntry);
 		}
 		
+		// Combat events should only be processed when frame #(json.gameTicks) is displayed, so add the events
+		// to a global list, and only process them when the frame is drawn.
+		if(json.gameTicks >= 0) {
+			globalState.waitingCombatEvents.push( { "ticks" :  json.gameTicks, "entityList" : entityList } );
+		}
+
 	}	
 }
 
 
+
+
 globalState.interval = setInterval( function() {
 	
+	let INTERVAL_DEBUG = false;
+	
+	if(globalState.lerpQueue.length > 0 && globalState.viewType != "SERVER_VIEW_WORLD") {
+
+		// All lerp frames together have at most 100 msec budget (due to 10 game-server-ticks per second)
+
+		// minimum time between lerp frames in msecs
+		let minimumElapsed = 20;
+
+		let fqLength = globalState.frameQueue.length;
+
+		if(fqLength < 10) {
+			minimumElapsed -= Math.floor(fqLength/1.2); 
+		} else if(fqLength < 20) {
+			minimumElapsed -= 13
+		} else if(fqLength < 30) {
+			minimumElapsed -= 16
+		} else if(fqLength < 40) {
+			minimumElapsed -= 18
+		} else {
+			minimumElapsed -= 20;
+		}
+		
+		if(minimumElapsed < 0) { minimumElapsed = 0; }
+
+		// If not enough time has elapsed since we last drew a frame, then return.
+		if(window.performance.now() - globalState.lerpFrameDrawTime < minimumElapsed ) {
+			return;
+		}
+
+		if(INTERVAL_DEBUG) { console.log("lerp queue: "+globalState.lerpQueue.length+" fq: "+globalState.frameQueue.length+" "+minimumElapsed); }
+
+		let entry = globalState.lerpQueue[0];
+		
+		globalState.lerpQueue.splice(0, 1);
+
+		globalState.lerpFrameDrawTime = window.performance.now();
+
+		if(INTERVAL_DEBUG) {
+			let xCoord_worldPixels = globalState.lerpViewCurrPosX_pixels + entry.x;
+			let yCoord_worldPixels = globalState.lerpViewCurrPosY_pixels + entry.y;
+			console.log(`world pix: (${xCoord_worldPixels}, ${yCoord_worldPixels})`)
+		}
+
+		let ex = entry.x, ey = entry.y;
+		if(entry.x + myCanvas.width > keyFrameBufferCanvas.width) {
+
+			if(INTERVAL_DEBUG) { console.log("adapted high"); }
+			
+			ex = keyFrameBufferCanvas.width - myCanvas.width;  
+		}
+		if(entry.y + myCanvas.height > keyFrameBufferCanvas.height) {
+			if(INTERVAL_DEBUG) { console.log("adapted high"); }
+			ey = keyFrameBufferCanvas.height - myCanvas.height;  
+		} 
+		
+		if(ex < 0) { ex = 0; if(INTERVAL_DEBUG) { console.log("adapted low"); } }
+		if(ey < 0) { ey = 0; if(INTERVAL_DEBUG) { console.log("adapted low"); } }
+		
+		let ctx = globalState.ctx;
+		ctx.drawImage(keyFrameBufferCanvas, ex, ey, myCanvas.width, myCanvas.height, 0, 0, myCanvas.width, myCanvas.height);
+
+		// Draw frame rate
+		ctx.fillStyle="white";	
+		ctx.font = '15px sans-serif';
+		ctx.fillText(globalState.nextFrameId - 1, 40, 40);
+
+		
+		// Draw player health at bottom of canvas
+		if(globalState.playerCurrHp != -1 && globalState.playerMaxHp != -1){
+			let percent = Math.max(0, globalState.playerCurrHp) / globalState.playerMaxHp;
+			let percentIndex = Math.max( 0, Math.min(99, 100*percent));
+			
+			// Draw colour part of damage bar
+			let offset = (myCanvas.width/5);
+			ctx.fillStyle=globalState.damageGradient[Math.floor(percentIndex)]; 
+			ctx.fillRect(offset, myCanvas.height-50, (myCanvas.width-(2*offset))*percent, 24);
+			
+			// Draw grey part of damage bar
+			ctx.fillStyle="#666666";
+			ctx.fillRect((myCanvas.width-(2*offset))*percent+offset, myCanvas.height-50, (myCanvas.width-(2*offset))*(1-percent), 24);
+			ctx.font = "20px Arial";
+			ctx.fillStyle = "white";
+			ctx.textAlign = "center";
+			let displayHealth = Math.max(0, globalState.playerCurrHp)+" / "+globalState.playerMaxHp;
+			ctx.fillText(displayHealth.trim(),myCanvas.width/2,myCanvas.height-30);
+			ctx.restore();
+			
+		}
+		
+		return;
+	}
+
 	var frameQueue = globalState.frameQueue;
 
-	//	console.log("fq length: "+frameQueue.length);
+	if(INTERVAL_DEBUG) { console.log("fq length: "+frameQueue.length); }
 
-	// Depending on how far behind we are in drawing the latest frames, we wait between 30 and 100 msecs.
-	var minimumElapsed = 30+7*Math.max(0, (10-frameQueue.length));	
-	if(window.performance.now() - globalState.lastFrameDrawTime < minimumElapsed ) {
-		return;
+	if(globalState.viewType == "SERVER_VIEW_WORLD") {
+		 // Depending on how far behind we are in drawing the latest frames, we wait between 30 and 100 msecs.
+		 let minimumElapsed = 30+7*Math.max(0, (10-frameQueue.length));	
+		 if(window.performance.now() - globalState.lastFrameDrawTime < minimumElapsed ) {
+			 return;
+		 }
 	}
 	
 	while(true) {
@@ -320,49 +458,232 @@ globalState.interval = setInterval( function() {
 			return;
 		}
 		
-//		console.log("lowest frame: "+lowestFrame);
-		
 		for(var x = 0; x < frameQueue.length; x++) {
 			
 			if(frameQueue[x].frame < lowestFrame) {
+
 				frameQueue.splice(x, 1);
 				x--;
 				
 			} else if(frameQueue[x].frame == lowestFrame) {
 				globalState.nextFrameId = lowestFrame+1;
-				drawFrameNewer(frameQueue[x],  /*globalState.nextFrameId % 10 != 0 &&*/ frameQueue.length > 10  );
+
+				// For any combat events from JsonUpdateBrowserUI, add them to our global entities list.
+				moveEntitiesForFrame(frameQueue[x].frame);
+				
+				processAndDrawNewFrame(frameQueue[x],  /*globalState.nextFrameId % 10 != 0 &&*/ frameQueue.length > 10  );
+
+				if(INTERVAL_DEBUG) {  console.log("nonlerp queue: "+globalState.lerpQueue.length+" fq: "+globalState.frameQueue.length); }
+				
 				frameQueue.splice(x, 1);
 				frameFound = true;
 				globalState.lastFrameDrawTime = window.performance.now();
-				
+
 				return;
 			}	
 		}
+		
 				
 		if(!frameFound) {
 			return;
 		}
 	}
-}, 5);
+}, 2);
 
-function drawFrame(event) {
+
+/** Look in waitingCombatEvents for any events that apply to the current frame ('currFrameTicks' param), 
+ * then add those matches to the global entity list (and remove them from waitingCombatEvents). */
+function moveEntitiesForFrame(currFrameTicks) {
+			
+	var elements = globalState.waitingCombatEvents;
+	
+	let matchFound = false;
+	
+	for(var i = elements.length -1; i >= 0 ; i--){
+						
+		if(elements[i].ticks == currFrameTicks ){
+							
+			elements[i].entityList.forEach( function(x) {
+				globalState.entityList.push(x);
+				matchFound = true;
+			});
+		} 
+						
+		if(elements[i].ticks <= currFrameTicks ){
+	        elements.splice(i, 1);
+	    }
+	}
+	
+	if(matchFound) {
+		// play combat sound
+		// var combatSound = new sound("resources/spawn.mp3");
+		// combatSound.play();
+	}
+					
+}
+
+
+function receiveFrameData(event) {
 	
 	var frameJson = jQuery.parseJSON(event.data);			
 	globalState.frameQueue.push(frameJson);
 	
 	if(globalState.frameQueue.length > 100) {
+
+		// TODO: What is this?
+
 		console.log("Closing!");
-		globalState.exampleSocket.close();
+		globalState.gameSocket.close();
 	}
 
 }
 
+function convertWorldPixelsToPixelsInImage(posX_worldCoord, posY_worldCoord, currWorldX, currWorldY, currViewWidth, currViewHeight, targetWidth, targetHeight, spriteSize) {
+
+	// Find the center point of the agent view
+	let centerPointOfFullViewX = Math.floor(currViewWidth/2)+currWorldX;
+	let centerPointOfFullViewY = Math.floor(currViewHeight/2)+currWorldY;
+
+	// Use the above center point to calculate the top left corner of the (smaller) browser view
+	let topLeftOfBrowserViewX_worldCoords = centerPointOfFullViewX - Math.floor(targetWidth/2);	
+	let topLeftOfBrowserViewY_worldCoords = centerPointOfFullViewY - Math.floor(targetHeight/2);
+
+	let topLeftOfBrowserViewX_canvasCoords = topLeftOfBrowserViewX_worldCoords - currWorldX;
+	let topLeftOfBrowserViewY_canvasCoords = topLeftOfBrowserViewY_worldCoords - currWorldY;
+
+	let posX_canvasCoords = posX_worldCoord + 32 * (0 - Math.floor(currViewWidth/2) + Math.floor(targetWidth/2) - currWorldX  +  topLeftOfBrowserViewX_canvasCoords);
+	let posY_canvasCoords = posY_worldCoord + 32 * (0 - Math.floor(currViewHeight/2) + Math.floor(targetHeight/2) - currWorldY  +  topLeftOfBrowserViewY_canvasCoords);
+	
+	return [posX_canvasCoords, posY_canvasCoords];
+}
+
+
+
+function convertWorldCoordsToPixelsInImage(posX_worldCoord, posY_worldCoord, currWorldX, currWorldY, currViewWidth, currViewHeight, targetWidth, targetHeight, spriteSize) {
+
+	// Find the center point of the agent view
+	let centerPointOfFullViewX = Math.floor(currViewWidth/2)+currWorldX;
+	let centerPointOfFullViewY = Math.floor(currViewHeight/2)+currWorldY;
+
+	// Use the above center point to calculate the top left corner of the (smaller) browser view
+	let topLeftOfBrowserViewX_worldCoords = centerPointOfFullViewX - Math.floor(targetWidth/2);	
+	let topLeftOfBrowserViewY_worldCoords = centerPointOfFullViewY - Math.floor(targetHeight/2);
+
+	let topLeftOfBrowserViewX_canvasCoords = topLeftOfBrowserViewX_worldCoords - currWorldX;
+	let topLeftOfBrowserViewY_canvasCoords = topLeftOfBrowserViewY_worldCoords - currWorldY;
+
+	let posX_canvasCoords = posX_worldCoord - Math.floor(currViewWidth/2) + Math.floor(targetWidth/2) - currWorldX  +  topLeftOfBrowserViewX_canvasCoords;
+	let posY_canvasCoords = posY_worldCoord - Math.floor(currViewHeight/2) + Math.floor(targetHeight/2) - currWorldY  +  topLeftOfBrowserViewY_canvasCoords;
+	
+	return [posX_canvasCoords * spriteSize, posY_canvasCoords * spriteSize ];
+}
+
+
+/** This is called when there is a new frame drawn */
+function createEntry(currWorldX, currWorldY, prevWorldX, prevWorldY, targetWidth, targetHeight, currViewWidth, currViewHeight, spriteSize) {
+
+	// The browser top left coorner in world coords
+	// Absent the lerp algorithm, this is what the browser would be showing
+	let naturalXPos_worldCoords, naturalYPos_worldCoords;
+	{
+		// Find the center point of the agent view
+		let centerPointOfFullViewX = Math.floor(currViewWidth/2)+currWorldX;
+		let centerPointOfFullViewY = Math.floor(currViewHeight/2)+currWorldY;
+	
+		// Use the above center point to calculate the top left corner of the (smaller) browser view
+		let topLeftOfBrowserViewX_worldCoords = centerPointOfFullViewX - Math.floor(targetWidth/2);
+		let topLeftOfBrowserViewY_worldCoords = centerPointOfFullViewY - Math.floor(targetHeight/2);
+
+		naturalXPos_worldCoords = topLeftOfBrowserViewX_worldCoords;
+		naturalYPos_worldCoords = topLeftOfBrowserViewY_worldCoords;
+
+	}
+
+	if(globalState.lerpViewCurrPosX_pixels == -1 || globalState.lerpViewCurrPosY_pixels == -1) {
+
+		globalState.lerpViewCurrPosX_pixels = naturalXPos_worldCoords * spriteSize;
+		globalState.lerpViewCurrPosY_pixels = naturalYPos_worldCoords * spriteSize; 
+
+	}
+	
+	let lerpViewCurrPosX_pixels = globalState.lerpViewCurrPosX_pixels;
+	let lerpViewCurrPosY_pixels = globalState.lerpViewCurrPosY_pixels;
+	
+
+
+	// The worst case scenario is the character constantly moving to the bottom of the screen, in which case we have this many frames:
+	// 1280 vs 800 (1280 - 800 = 400)
+	// This is the difference in pixels between the browser size and the agent size
+
+	// in the worst case scenario, the user is moving 320 pixels a second down.
+
+	let distanceWeNeedToCloseX_worldPixels = (32 * naturalXPos_worldCoords) - lerpViewCurrPosX_pixels;
+	let distanceWeNeedToCloseY_worldPixels = (32 * naturalYPos_worldCoords) - lerpViewCurrPosY_pixels;
+
+	//	console.log(`distance in world pixels: (${distanceWeNeedToCloseX_worldPixels}, ${distanceWeNeedToCloseY_worldPixels}) `);
+	
+	let closeInHowManyFrames;
+	
+	{
+		var absDistanceWeNeedToCloseY_worldPixels = Math.abs(distanceWeNeedToCloseY_worldPixels);
+		
+		absDistanceWeNeedToCloseY_worldPixels = Math.min(absDistanceWeNeedToCloseY_worldPixels, 320); // x <= 320
+		absDistanceWeNeedToCloseY_worldPixels = Math.max(absDistanceWeNeedToCloseY_worldPixels, 0); // x >= 0
+		
+		closeInHowManyFrames = 12 - Math.max(0, Math.min(10, absDistanceWeNeedToCloseY_worldPixels/45));
+	}
+		
+	// console.log("distance: "+ distanceWeNeedToCloseY_worldPixels+" " +closeInHowManyFrames);
+	
+	let srcX_worldPixels = lerpViewCurrPosX_pixels;
+	let srcY_worldPixels = lerpViewCurrPosY_pixels;
+
+	let destX_worldPixels = lerpViewCurrPosX_pixels + Math.ceil(distanceWeNeedToCloseX_worldPixels / closeInHowManyFrames);
+	let destY_worldPixels = lerpViewCurrPosY_pixels + Math.ceil(distanceWeNeedToCloseY_worldPixels / closeInHowManyFrames);
+	
+
+	var src_pixels = convertWorldPixelsToPixelsInImage(srcX_worldPixels, srcY_worldPixels, currWorldX, currWorldY, currViewWidth, currViewHeight, targetWidth, targetHeight, spriteSize)
+	var dest_pixels = convertWorldPixelsToPixelsInImage(destX_worldPixels, destY_worldPixels, currWorldX, currWorldY, currViewWidth, currViewHeight, targetWidth, targetHeight, spriteSize)
+
+	let result = interpolateCoords( src_pixels[0], src_pixels[1], dest_pixels[0], dest_pixels[1], LERP_CONSTANT);
+
+	globalState.lerpViewCurrPosX_pixels = destX_worldPixels;
+	globalState.lerpViewCurrPosY_pixels = destY_worldPixels;
+
+	return result;
+}
+
+/* Get from (src, srcY) to (destX, destY) in 'count' equal increments.  */
+function interpolateCoords(srcX, srcY, destX, destY, count) {
+
+	let result = [];
+
+	let currX_float = srcX, currY_float = srcY;
+
+	let deltaX_float = (destX-srcX)/count;
+	let deltaY_float = (destY-srcY)/count;
+
+	for(let x = 0; x < count; x++) {
+
+		let entry = {
+			"x" : Math.floor(currX_float),
+			"y" : Math.floor(currY_float)
+		};
+
+		result.push(entry);
+
+		currX_float += deltaX_float;
+		currY_float += deltaY_float;
+	}
+
+	return result;
+}
+
+
 function disposeGlobalState() {
 	globalState.mouseMoveEnabled = false;
-	// globalState.exampleSocket.onclose = null;
-	// globalState.exampleSocket.onmessage = null;
-	// globalState.exampleSocket = null;
 	globalState.ctx = null;
+	globalState.keyFrameBufferCtx = null;
 	globalState.globalTileMap = {};
 	globalState.entityList = {};
 	globalState.frameQueue = {};
@@ -370,17 +691,15 @@ function disposeGlobalState() {
 	globalState.imageMap = {};
 	globalState.console = {};
 	globalState.dataArray = {};
-	globalState.dirtyRedraw = {};
+//	globalState.dirtyRedraw = {};
 	clearInterval(globalState.interval);
 	globalState.scaleCache = null;
 
 	globalState.offscreenCanvas = null;
 	globalState.offscreenContext = null;
+	globalState.lerpQueue = null;
 
-//	globalState = {};	
 }
-
-
 
 function addToDataMap(x, y, worldXSize, worldYSize, imageNumber, rotation, layerIndex, layerSize) {
 	
@@ -400,12 +719,13 @@ function getFromDataMap(x, y, worldXSize, worldYSize) {
 }
 
 
-function drawFrameNewer(param, skipdraw) {
-	var ctx = globalState.ctx;
+function processAndDrawNewFrame(param, skipdraw) {
 	
 	var spriteSize = globalState.spriteSize;	
 
 	// The tile (x,y) coords for the top-left hand side of the canvas
+	// - (startX, startY) differ from (currWorldPosX, currWorldPosY) as startX/Y uses a smaller rectangle based on sprite size, 
+	//   whereas currWorldPosX/Y uses (80, 40)
 	var startX = 0, startY = 0;	
 
 	// Width/height of the canvas in # of tiles, for example, 40x40
@@ -415,18 +735,27 @@ function drawFrameNewer(param, skipdraw) {
 		skipdraw = false;
 	}
 
+	let targetWidth = param.currViewWidth;
+	let targetHeight = param.currViewHeight;
+
 	if(globalState.viewType != "SERVER_VIEW_WORLD") {
-		actualWidth = Math.floor(myCanvas.width/spriteSize)+2;
-		actualHeight = Math.floor(myCanvas.height/spriteSize)+2;
+
+		actualWidth = param.currViewWidth;
+		actualHeight = param.currViewHeight;
+
+		targetWidth = Math.floor(myCanvas.width/spriteSize)+2;
+		targetHeight = Math.floor(myCanvas.height/spriteSize)+2;
 		
-		let centerPointX = Math.floor(param.currViewWidth/2)+param.currWorldPosX;
-		let centerPointY = Math.floor(param.currViewHeight/2)+param.currWorldPosY;
+		// Find the center point of the agent view
+		// let centerPointX = Math.floor(param.currViewWidth/2)+param.currWorldPosX;
+		// let centerPointY = Math.floor(param.currViewHeight/2)+param.currWorldPosY;
 	
-		centerPointX -= Math.floor(actualWidth/2);
-		centerPointY -= Math.floor(actualHeight/2);
+		// // Use the above center point to calculate the top left corner of the (smaller) browser view
+		// centerPointX -= Math.floor(actualWidth/2);
+		// centerPointY -= Math.floor(actualHeight/2);
 	
-		startX = centerPointX;
-		startY = centerPointY;
+		startX = param.currWorldPosX;
+		startY = param.currWorldPosY;
 
 	} else {
 
@@ -436,31 +765,12 @@ function drawFrameNewer(param, skipdraw) {
 		startY = param.currWorldPosY;
 	}
 
-	// Replace the primary context with a clean drawing of the world (without usernames/damage drawn)
-	if(!skipdraw && secondaryCtxDrawn) {
-		ctx.drawImage(secondaryCanvas, 0, 0);
-	}
-
 	if(skipdraw) {
-		console.log("skipping draw of "+param.frame);
+		console.log("Skipping draw of "+param.frame);
 	}
-	
-	
-	var currRedrawManager = globalState.dirtyRedraw;
-	globalState.dirtyRedraw = new RedrawManager(spriteSize*5, spriteSize*5);
-	
-	if(currRedrawManager == null) {
 		
-		// First frame
-		currRedrawManager = new RedrawManager(spriteSize*5, spriteSize*5);
-		
-		// Draw the right 200 pixels as a different shade, to match the leaderboard panel
-		ctx.fillStyle="rgb(174, 223, 101)";
-		ctx.fillRect(0, 0, ctx.canvas.width-200, ctx.canvas.height);
-		ctx.fillStyle="#27782e";
-		ctx.fillRect(ctx.canvas.width-200, 0, ctx.canvas.width, ctx.canvas.height);
-		
-	}
+	var currRedrawManager = new RedrawManager(spriteSize*5, spriteSize*5);
+//	globalState.dirtyRedraw = currRedrawManager;
 		
 	if(param.currWorldPosX != globalState.currWorldX || param.currWorldPosY != globalState.currWorldY || globalState.currWorldX == null || globalState.currWorldY == null) {
 		currRedrawManager.flagPixelRect(0, 0, param.currViewWidth*spriteSize, param.currViewHeight*spriteSize);
@@ -470,13 +780,6 @@ function drawFrameNewer(param, skipdraw) {
 	// See BrowserWebSocketClientShared
 	var mapData = param.frameData;
 	
-	if(!globalState.contextWidthSet) {
-		// I think this whole block can be removed
-		ctx.canvas.width = window.innerWidth;
-		ctx.canvas.height = window.innerHeight;
-		globalState.contextWidthSet = true;
-	}
-
 	// For each updated tile on the map, update the dataMap with the latest contents
 	var numDelta = mapData.length;
 	for(let deltaIndex = 0; deltaIndex < numDelta; deltaIndex++) {
@@ -532,51 +835,110 @@ function drawFrameNewer(param, skipdraw) {
 		}
 		
 	} // end deltaIndex for
-
+	
 	if(!skipdraw) {
+		
+		// There are different optimizations used on world draw, versus on non-world lerp draw. 
+		if(globalState.viewType == "SERVER_VIEW_WORLD") {
+			// There is no need for LERP for world draw, because the world canvas doesn't move.
+			drawFrameForWorld(actualWidth, actualHeight, startX, startY, param, skipdraw, currRedrawManager);	
+		} else {
+			// Non-world draw can skip some optimizations, because it does not need to draw the whole world at once.
+			drawFrameForLerp(actualWidth, actualHeight, startX, startY, param, skipdraw, currRedrawManager);
 
-		for(let x = 0; x < actualWidth; x++) {
-			for(let y = 0; y < actualHeight; y++) {
-				// For each tile in the view, check if it is dirty (and we thus we need to redraw it)
+			// Create lerp queue entries (camera movements over the drawn keyframe image)
+			globalState.lerpQueue = createEntry(param.currWorldPosX, param.currWorldPosY, globalState.currWorldX, 
+					globalState.currWorldY, targetWidth, targetHeight, param.currViewWidth, param.currViewHeight, spriteSize);
+
+		}
+		
+	}
+	
+
+	globalState.currWorldX = param.currWorldPosX;
+	globalState.currWorldY = param.currWorldPosY;
+	globalState.startX = startX;
+	globalState.startY = startY;
+
+}
+
+function drawFrameForLerp(actualWidth, actualHeight, startX, startY, param, skipdraw, currRedrawManager) {
+
+	var ctx = globalState.keyFrameBufferCtx;
+	
+	var spriteSize = globalState.spriteSize;	
+
+	if(!globalState.firstFrameDrawn) {
+		// Draw the right 200 pixels as a different shade, to match the leaderboard panel
+		ctx.fillStyle="rgb(174, 223, 101)";
+		ctx.fillRect(0, 0, ctx.canvas.width-200, ctx.canvas.height);
+		ctx.fillStyle="#27782e";
+		ctx.fillRect(ctx.canvas.width-200, 0, ctx.canvas.width, ctx.canvas.height);
+		
+		globalState.firstFrameDrawn = true;
+	} 
+		
+	for(let x = 0; x < actualWidth; x++) {
+		for(let y = 0; y < actualHeight; y++) {
+			// For each tile in the view, check if it is dirty (and we thus we need to redraw it)
+			
+			let redraw = currRedrawManager.getByPixel(x*spriteSize, y*spriteSize);
+			
+			if(true || redraw) {
+				let cachedTile = getFromDataMap(startX+x, startY+y, param.currViewWidth, param.currViewHeight);
 				
-				let redraw = currRedrawManager.getByPixel(x*spriteSize, y*spriteSize);
-				
-				if(redraw) {
-					let cachedTile = getFromDataMap(startX+x, startY+y, param.currViewWidth, param.currViewHeight);
-					
-					if(cachedTile != null) {
-						for(let layerIndex = cachedTile.length-1; layerIndex >= 0; layerIndex--) {
-							let layer = cachedTile[layerIndex];
-							
-							let img = globalState.imageMap.get(layer.num);
-							if(img != null) {
-								drawRotatedImage(ctx, img, x*spriteSize, y*spriteSize, layer.num,  layer.rot);
-							}							
-						}
+				if(cachedTile != null) {
+					for(let layerIndex = cachedTile.length-1; layerIndex >= 0; layerIndex--) {
+						let layer = cachedTile[layerIndex];
+						
+						let img = globalState.imageMap.get(layer.num);
+						if(img != null) {
+							drawRotatedImage(ctx, img, x*spriteSize, y*spriteSize, layer.num,  layer.rot);
+						}							
 					}
-					
 				}
+				
 			}
 		}
+	}
 
-		// Copy the up-to-date main canvas to th  secondary ctx
-		secondaryCtx.drawImage(myCanvas, 0, 0);
-		secondaryCtxDrawn = true;
+	// Draw username/creature damage on the key frame buffer
+	for(let x = 0; x < param.creatures.length; x++) {
+		
+		let creature = param.creatures[x];
+		let percent = Math.max(0, creature.hp) / creature.maxHp;
+		
+		let posX = creature.position[0]-startX;
+		let posY = creature.position[1]-startY;
 
-		// Now that we have a clean copy of the canvas stored in secondaryCtx, we are going to draw username/creature damage on the main canvas
-		for(let x = 0; x < param.creatures.length; x++) {
-			
-			let creature = param.creatures[x];
-			let percent = Math.max(0, creature.hp) / creature.maxHp;
-			
-			let posX = creature.position[0]-startX;
-			let posY = creature.position[1]-startY;
-
-			if(posY >= actualHeight-2) {
-				continue;
-			}
-			
-			let percentIndex = Math.max( 0, Math.min(99, 100*percent));
+		if(posY >= actualHeight-2) {
+			continue;
+		}
+		
+		let percentIndex = Math.max( 0, Math.min(99, 100*percent));
+		
+		if(creature.username == GLOBAL_USERNAME){
+			globalState.playerCurrHp = creature.hp;
+			globalState.playerMaxHp = creature.maxHp;
+		}
+		
+//		if(false && creature.username == GLOBAL_USERNAME){
+//			// Draw colour part of damage bar
+//			var offset = (myCanvas.width/5);
+//			ctx.fillStyle=globalState.damageGradient[Math.floor(percentIndex)]; 
+//			ctx.fillRect(offset, myCanvas.height-50, (myCanvas.width-(2*offset))*percent, 24);
+//			
+//			// Draw grey part of damage bar
+//			ctx.fillStyle="#666666";
+//			ctx.fillRect((myCanvas.width-(2*offset))*percent+offset, myCanvas.height-50, (myCanvas.width-(2*offset))*(1-percent), 24);
+//			ctx.font = "20px Arial";
+//			ctx.fillStyle = "white";
+//			ctx.textAlign = "center";
+//			var displayHealth = Math.max(0, creature.hp)+" / "+creature.maxHp;
+//			ctx.fillText(displayHealth.trim(),myCanvas.width/2,myCanvas.height-30);
+//			ctx.restore();
+//			
+//		} else {
 			
 			// Draw colour part of damage bar
 			ctx.fillStyle=globalState.damageGradient[Math.floor(percentIndex)]; 
@@ -588,63 +950,65 @@ function drawFrameNewer(param, skipdraw) {
 			ctx.fillRect(posX*spriteSize+spriteSize*percent,(posY+1)*spriteSize+5,spriteSize*(1-percent),4);
 			// globalState.dirtyRedraw.flagPixelRect(posX*spriteSize+spriteSize*percent,(posY+1)*spriteSize+5,spriteSize*(1-percent),4);
 			
-			// Draw username as white on black text
-			if(creature.username != null /*&& (globalState.viewType == "SERVER_VIEW_FOLLOW" || globalState.viewType == "CLIENT_VIEW")*/ ) {
-				
-				ctx.font = globalState.viewType == "SERVER_VIEW_WORLD" ? '9px sans-serif' : '12px sans-serif';				
-				
-				let textSizeWidth = ctx.measureText(creature.username).width;
-				let textSizeHeight = ctx.measureText("M").width;
-				
-				let yDelta = globalState.viewType == "SERVER_VIEW_WORLD" ? 10: 0;
-				
-				let xPos = posX*(spriteSize) + Math.floor(spriteSize/2) - Math.floor(textSizeWidth/2)
-				
-				ctx.fillStyle="black";
-				ctx.fillRect(xPos, (posY+2)*(spriteSize)-textSizeHeight+2+yDelta, textSizeWidth+6, textSizeHeight+8);
-				// globalState.dirtyRedraw.flagPixelRect(xPos, (posY+2)*(spriteSize)-textSizeHeight+2+yDelta, textSizeWidth+6, textSizeHeight+8);
-				
-				
-				ctx.fillStyle="white";	
+//		}
+		
+		
+		// Draw username as white on black text
+		if(creature.username != null /*&& (globalState.viewType == "SERVER_VIEW_FOLLOW" || globalState.viewType == "CLIENT_VIEW")*/ ) {
+			
+			ctx.font = globalState.viewType == "SERVER_VIEW_WORLD" ? '9px sans-serif' : '12px sans-serif';				
+			
+			let textSizeWidth = ctx.measureText(creature.username).width;
+			let textSizeHeight = ctx.measureText("M").width;
+			
+			let yDelta = globalState.viewType == "SERVER_VIEW_WORLD" ? 10: 0;
+			
+			let xPos = posX*(spriteSize) + Math.floor(spriteSize/2) - Math.floor(textSizeWidth/2)
+			
+			ctx.fillStyle="black";
+			ctx.fillRect(xPos, (posY+2)*(spriteSize)-textSizeHeight+2+yDelta, textSizeWidth+6, textSizeHeight+8);
+			// globalState.dirtyRedraw.flagPixelRect(xPos, (posY+2)*(spriteSize)-textSizeHeight+2+yDelta, textSizeWidth+6, textSizeHeight+8);
+			
+			
+			ctx.fillStyle="white";	
 //				ctx.font = '12px sans-serif';				
-				ctx.fillText(creature.username, xPos+3, (posY+2)*spriteSize+4+yDelta);
-				
-			}
+			ctx.fillText(creature.username, xPos+3, (posY+2)*spriteSize+4+yDelta);
+			
+		}
 
-		}
+	}
+	
+	if(globalState.viewType == "SERVER_VIEW_FOLLOW") {
+		serverViewFollowPos = { x : param.currWorldPosX, y : param.currWorldPosY, w: param.currViewWidth, h: param.currViewHeight };
 		
-		if(globalState.viewType == "SERVER_VIEW_FOLLOW") {
-			serverViewFollowPos = { x : param.currWorldPosX, y : param.currWorldPosY, w: param.currViewWidth, h: param.currViewHeight };
-			
-		} else if(globalState.viewType == "SERVER_VIEW_WORLD") {
-			
-			// Blue rectangle 
-			if(serverViewFollowPos != null) {
-				
-				let lineWidth = 3;
-				ctx.beginPath();
-				ctx.lineWidth=""+lineWidth;
-				ctx.strokeStyle="#000099";
-				
-				let rectX = (serverViewFollowPos.x*spriteSize)-lineWidth;
-				let rectY = (serverViewFollowPos.y*spriteSize)-lineWidth;
-				
-				ctx.rect(rectX, rectY, serverViewFollowPos.w*spriteSize, serverViewFollowPos.h*spriteSize);
-				// globalState.dirtyRedraw.flagPixelRect( (rectX)-lineWidth, (rectY)-lineWidth, (serverViewFollowPos.w*spriteSize)+(lineWidth*2), (serverViewFollowPos.h*spriteSize)+(lineWidth*2) );
-				ctx.stroke();
-			}
-			  
-		}
+	} else if(globalState.viewType == "SERVER_VIEW_WORLD") {
 		
-		// Draw frame rate
-		ctx.fillStyle="white";	
-		ctx.font = '15px sans-serif';
-		ctx.fillText(param.frame, 20, 20);
-	} // end skip draw
+		// Blue rectangle 
+		if(serverViewFollowPos != null) {
+			
+			let lineWidth = 3;
+			ctx.beginPath();
+			ctx.lineWidth=""+lineWidth;
+			ctx.strokeStyle="#000099";
+			
+			let rectX = (serverViewFollowPos.x*spriteSize)-lineWidth;
+			let rectY = (serverViewFollowPos.y*spriteSize)-lineWidth;
+			
+			ctx.rect(rectX, rectY, serverViewFollowPos.w*spriteSize, serverViewFollowPos.h*spriteSize);
+			// globalState.dirtyRedraw.flagPixelRect( (rectX)-lineWidth, (rectY)-lineWidth, (serverViewFollowPos.w*spriteSize)+(lineWidth*2), (serverViewFollowPos.h*spriteSize)+(lineWidth*2) );
+			ctx.stroke();
+		}
+		  
+	}
+	
+	// Draw frame rate
+	ctx.fillStyle="white";	
+	ctx.font = '15px sans-serif';
+	ctx.fillText(param.frame, 40, 40);
 
 	
 	// Draw floating damage text
-	if(!skipdraw && globalState.entityList != null) {
+	if(globalState.entityList != null) {
 		
 		let fontSize = 20;
 		
@@ -657,8 +1021,8 @@ function drawFrameNewer(param, skipdraw) {
 
 			entity.frame++;
 			
-			let col = entity.worldx - startX; // param.currWorldPosX;
-			let row = entity.worldy - startY; // param.currWorldPosY;
+			let col = entity.worldx - startX; 
+			let row = entity.worldy - startY; 
 			
 			entity.xoffset += entity.directionX*5;
 			entity.yoffset += entity.directionY*5;
@@ -685,9 +1049,10 @@ function drawFrameNewer(param, skipdraw) {
 				c--;
 			}
 		}
-	} // end !skipdraw
+	} 
 	
-	if(!skipdraw && globalState.viewType == "SERVER_VIEW_WORLD") {
+	// In the world view, draw a black dividing line between the frames, in the centre of the screen.   
+	if(globalState.viewType == "SERVER_VIEW_WORLD") {
 	      ctx.beginPath();
 	      ctx.lineWidth=1;
 	      ctx.fillStyle="rgb(0, 0, 0)";
@@ -695,12 +1060,192 @@ function drawFrameNewer(param, skipdraw) {
 	      ctx.lineTo(0, 2000);
 	      ctx.stroke();
 	}
+		
+} 
+
+
+function drawFrameForWorld(actualWidth, actualHeight, startX, startY, param, skipdraw, currRedrawManager) {
+
+	var ctx = globalState.ctx;
 	
-	globalState.currWorldX = param.currWorldPosX;
-	globalState.currWorldY = param.currWorldPosY;
-	globalState.startX = startX;
-	globalState.startY = startY;
+	var spriteSize = globalState.spriteSize;	
+
+	// Replace the primary context with a clean drawing of the world (without usernames/damage drawn)
+	if(secondaryCtxDrawn) {
+		ctx.drawImage(secondaryCanvas, 0, 0);
+	}
+
+	if(!globalState.firstFrameDrawn) {
+		// Draw the right 200 pixels as a different shade, to match the leaderboard panel
+		ctx.fillStyle="rgb(174, 223, 101)";
+		ctx.fillRect(0, 0, ctx.canvas.width-200, ctx.canvas.height);
+		ctx.fillStyle="#27782e";
+		ctx.fillRect(ctx.canvas.width-200, 0, ctx.canvas.width, ctx.canvas.height);
+		
+		globalState.firstFrameDrawn = true;
+	} 
+		
+	for(let x = 0; x < actualWidth; x++) {
+		for(let y = 0; y < actualHeight; y++) {
+			// For each tile in the view, check if it is dirty (and we thus we need to redraw it)
+			
+			let redraw = currRedrawManager.getByPixel(x*spriteSize, y*spriteSize);
+			
+			if(redraw) {
+				let cachedTile = getFromDataMap(startX+x, startY+y, param.currViewWidth, param.currViewHeight);
+				
+				if(cachedTile != null) {
+					for(let layerIndex = cachedTile.length-1; layerIndex >= 0; layerIndex--) {
+						let layer = cachedTile[layerIndex];
+						
+						let img = globalState.imageMap.get(layer.num);
+						if(img != null) {
+							drawRotatedImage(ctx, img, x*spriteSize, y*spriteSize, layer.num,  layer.rot);
+						}							
+					}
+				}
+				
+			}
+		}
+	}
+
+	// Copy the up-to-date main canvas to the secondary ctx
+	secondaryCtx.drawImage(myCanvas, 0, 0);
+	secondaryCtxDrawn = true;
+
+	// Now that we have a clean copy of the canvas stored in secondaryCtx, we are going to draw username/creature damage on the main canvas
+	for(let x = 0; x < param.creatures.length; x++) {
+		
+		let creature = param.creatures[x];
+		let percent = Math.max(0, creature.hp) / creature.maxHp;
+		
+		let posX = creature.position[0]-startX;
+		let posY = creature.position[1]-startY;
+
+		if(posY >= actualHeight-2) {
+			continue;
+		}
+		
+		let percentIndex = Math.max( 0, Math.min(99, 100*percent));
+		
+		// Draw colour part of damage bar
+		ctx.fillStyle=globalState.damageGradient[Math.floor(percentIndex)]; 
+		ctx.fillRect(posX*spriteSize,(posY+1)*spriteSize+5,spriteSize*percent,4);
+		// globalState.dirtyRedraw.flagPixelRect(posX*spriteSize,(posY+1)*spriteSize+5,spriteSize*percent,4);
+		
+		// Draw grey part of damage bar
+		ctx.fillStyle="#666666";
+		ctx.fillRect(posX*spriteSize+spriteSize*percent,(posY+1)*spriteSize+5,spriteSize*(1-percent),4);
+		// globalState.dirtyRedraw.flagPixelRect(posX*spriteSize+spriteSize*percent,(posY+1)*spriteSize+5,spriteSize*(1-percent),4);
+		
+		// Draw username as white on black text
+		if(creature.username != null /*&& (globalState.viewType == "SERVER_VIEW_FOLLOW" || globalState.viewType == "CLIENT_VIEW")*/ ) {
+			
+			ctx.font = globalState.viewType == "SERVER_VIEW_WORLD" ? '9px sans-serif' : '12px sans-serif';				
+			
+			let textSizeWidth = ctx.measureText(creature.username).width;
+			let textSizeHeight = ctx.measureText("M").width;
+			
+			let yDelta = globalState.viewType == "SERVER_VIEW_WORLD" ? 10: 0;
+			
+			let xPos = posX*(spriteSize) + Math.floor(spriteSize/2) - Math.floor(textSizeWidth/2)
+			
+			ctx.fillStyle="black";
+			ctx.fillRect(xPos, (posY+2)*(spriteSize)-textSizeHeight+2+yDelta, textSizeWidth+6, textSizeHeight+8);
+			// globalState.dirtyRedraw.flagPixelRect(xPos, (posY+2)*(spriteSize)-textSizeHeight+2+yDelta, textSizeWidth+6, textSizeHeight+8);
+			
+			
+			ctx.fillStyle="white";	
+//				ctx.font = '12px sans-serif';				
+			ctx.fillText(creature.username, xPos+3, (posY+2)*spriteSize+4+yDelta);
+			
+		}
+
+	}
 	
+	if(globalState.viewType == "SERVER_VIEW_FOLLOW") {
+		serverViewFollowPos = { x : param.currWorldPosX, y : param.currWorldPosY, w: param.currViewWidth, h: param.currViewHeight };
+		
+	} else if(globalState.viewType == "SERVER_VIEW_WORLD") {
+		
+		// Blue rectangle 
+		if(serverViewFollowPos != null) {
+			
+			let lineWidth = 3;
+			ctx.beginPath();
+			ctx.lineWidth=""+lineWidth;
+			ctx.strokeStyle="#000099";
+			
+			let rectX = (serverViewFollowPos.x*spriteSize)-lineWidth;
+			let rectY = (serverViewFollowPos.y*spriteSize)-lineWidth;
+			
+			ctx.rect(rectX, rectY, serverViewFollowPos.w*spriteSize, serverViewFollowPos.h*spriteSize);
+			// globalState.dirtyRedraw.flagPixelRect( (rectX)-lineWidth, (rectY)-lineWidth, (serverViewFollowPos.w*spriteSize)+(lineWidth*2), (serverViewFollowPos.h*spriteSize)+(lineWidth*2) );
+			ctx.stroke();
+		}
+		  
+	}
+	
+	// Draw frame rate
+	ctx.fillStyle="white";	
+	ctx.font = '15px sans-serif';
+	ctx.fillText(param.frame, 20, 20);
+
+	
+	// Draw floating damage text
+	if(globalState.entityList != null) {
+		
+		let fontSize = 20;
+		
+		if(spriteSize < 10) {
+			fontSize = 10;
+		}
+		
+		for(let c = 0; c < globalState.entityList.length; c++) {
+			let entity = globalState.entityList[c];
+
+			entity.frame++;
+			
+			let col = entity.worldx - startX; 
+			let row = entity.worldy - startY; 
+			
+			entity.xoffset += entity.directionX*5;
+			entity.yoffset += entity.directionY*5;
+			
+			
+			if(row >= 0 && col >= 0 && row < param.currViewHeight && col <= param.currViewWidth) {
+				let colX = col*globalState.spriteSize;
+				let colY = row*globalState.spriteSize;
+				
+				// Don't draw text outside the visible world on the canvas 
+				if(colX + entity.xoffset < actualWidth*spriteSize && colY + entity.yoffset < actualHeight*spriteSize) {
+					
+					ctx.fillStyle="red";
+					ctx.font = fontSize+'px sans-serif';
+					ctx.fillText(entity.damage, colX+entity.xoffset, colY+entity.yoffset);
+					// globalState.dirtyRedraw.flagPixelRect(colX+entity.xoffset-30, colY+entity.yoffset-30, 60, 60);
+					
+				}
+			}
+			
+			// If an entity has drawn for more than 10 frames, remove it
+			if(entity.frame > 10) {
+				globalState.entityList.splice(c,1);
+				c--;
+			}
+		}
+	} 
+	
+	// In the world view, draw a black dividing line between the frames, in the centre of the screen.   
+	if(globalState.viewType == "SERVER_VIEW_WORLD") {
+	      ctx.beginPath();
+	      ctx.lineWidth=1;
+	      ctx.fillStyle="rgb(0, 0, 0)";
+	      ctx.moveTo(0, 0);
+	      ctx.lineTo(0, 2000);
+	      ctx.stroke();
+	}
+		
 } 
 	
 function loadSprite(src, id) {
@@ -972,6 +1517,27 @@ function updateConsoleUI(console, consoleDomElement) {
 
 }
 
+function updateInventoryUI(inventoryDomElement, json) {
+	var invStr = "<b>Inventory</b>: <br/></br>";
+	if(json.inventory) {
+		for(var x = 0; x < json.inventory.length; x++) {
+			invStr += "<span>" + json.inventory[x].name + (json.inventory[x].quantity > 1 ? " x" +json.inventory[x].quantity : "") + "</span><br/>";
+		}
+	}
+	
+	inventoryDomElement.innerHTML = "<span id='items_span'>" + invStr + "</span>";
+}
+
+function updateEquipmentUI(equipmentDomElement, json) {
+	var equipStr = "<b>Equipment</b>: <br/></br>";
+	if(json.equipment) {
+		for(var x = 0; x < json.equipment.length; x++) {
+			equipStr += "<span>" + json.equipment[x].name + "</span><br/>";
+		}
+	}
+	equipmentDomElement.innerHTML = "<span id='items_span'>" + equipStr + "</span>";
+}
+
 function formatScore(score) {
 	return score.toLocaleString();
 }
@@ -992,11 +1558,14 @@ function addCanvasListeners() {
 			return;
 		}
 
-		var pageX = e.clientX;
+		var pageX = e.clientX; 
 		var pageY = e.clientY;
-		
-		var worldCol = Math.max(0, Math.floor(pageX/globalState.spriteSize) + globalState.startX - 4);
-		var worldRow = Math.max(0, Math.floor(pageY/globalState.spriteSize) + globalState.startY - 4);
+
+		var worldCol = Math.max(0, Math.floor((pageX + globalState.lerpViewCurrPosX_pixels)/globalState.spriteSize) - 4);
+		var worldRow = Math.max(0, Math.floor((pageY + globalState.lerpViewCurrPosY_pixels)/globalState.spriteSize) - 4);
+
+//		var worldCol = Math.max(0, Math.floor(pageX/globalState.spriteSize) + globalState.startX - 4);
+//		var worldRow = Math.max(0, Math.floor(pageY/globalState.spriteSize) + globalState.startY - 4);
 		
 		var localTileMap = new Map();
 		
@@ -1066,6 +1635,22 @@ function addCanvasListeners() {
 
 }
 
+
+// A function to play game sounds
+function sound(src) {
+    this.sound = document.createElement("audio");
+    this.sound.src = src;
+    this.sound.setAttribute("preload", "auto");
+    this.sound.setAttribute("controls", "none");
+    this.sound.style.display = "none";
+    document.body.appendChild(this.sound);
+    this.play = function(){
+        this.sound.play();
+    }
+    this.stop = function(){
+        this.sound.pause();
+    }
+}
 
 
 }
