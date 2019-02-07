@@ -53,7 +53,7 @@ public class RCRuntime {
 	
 	public static final long MAX_LATENCY_SIM_IN_NANOS = TimeUnit.NANOSECONDS.convert(1000, TimeUnit.MICROSECONDS);
 
-	/** This should always be true (unless you a Rogue Cloud developer writing a client that does not support deflate) */
+	/** This should always be true (unless you a Microclimate developer writing a client that does not support deflate) */
 	public static final boolean ENABLE_DEFLATE_COMPRESSION = true;
 	
 	public static long convertToLong(Object o) {
