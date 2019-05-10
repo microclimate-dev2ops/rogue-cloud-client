@@ -1,6 +1,13 @@
 ENV JAVA_VERSION_PREFIX 1.8.0
 ENV HOME /home/default
 
+USER root
+RUN apt update
+RUN apt install -y wget unzip
+RUN rm -rf /var/lib/apt/lists
+USER 1001
+
+
 RUN set -eux; \
     ARCH="$(dpkg --print-architecture)"; \
     case "${ARCH}" in \
